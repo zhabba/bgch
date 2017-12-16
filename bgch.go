@@ -24,8 +24,9 @@ var searchImagesRecursively = flag.Bool("r", false, "Search images recursively. 
 var needHelp = flag.Bool("help", false, "Show this help. Optional")
 
 var userEnvironment = make(map[string]string)
-var bgDirs []string
-var bgFiles []string
+var bgDirs = make([]string, 0)
+var bgFiles = make([]string, 0)
+var errors = make([]error, 0)
 var allowedFileTypes = []string{"jpeg", "jpg", "png"}
 
 func init() {
@@ -38,47 +39,48 @@ func init() {
 }
 
 func main() {
-	var errors []error
 	readUserEnvironment()
 	log.Printf("Will use %v dirs as backgrounds directory and change background every %v seconds.", *backgroundsDir, *timeToShow)
-	bgDirs = setUpBackgroundsDir(*backgroundsDir)
-	bgFiles, errors = scanBackgroundsDir(bgDirs)
-	log.Printf("Files %v ", bgFiles)
-	startLoop(*timeToShow)
-	if len(errors) > 0 {
-		for _, e := range errors {
-			log.Printf("Dir scan error: %v", e)
-			os.Exit(1)
-		}
-	}
+	setUpBackgroundsDir()
+	go loop()
+	select{}
 }
 
-func startLoop(tts int) {
+func loop() {
 	seed := rand.NewSource(time.Now().UnixNano())
 	rnd := rand.New(seed)
+	doneScan := make(chan bool, 1)
+	doneBgChange := make(chan bool, 1)
+	doneScSaverChange := make(chan bool, 1)
 	for {
+		go scanBackgroundsDir(doneScan)
+		<- doneScan
 		randInd := rnd.Intn(len(bgFiles) - 1)
 		bgFile := bgFiles[randInd]
-		go changeBackground(bgFile)
-		go changeScreensaver(bgFile)
-		time.Sleep(time.Second * time.Duration(tts))
+		log.Printf("Files %v", bgFiles)
+		go changeBackground(bgFile, doneBgChange)
+		go changeScreensaver(bgFile, doneScSaverChange)
+		<- doneBgChange
+		<- doneScSaverChange
 	}
 }
 
-func changeBackground(bg string) {
+func changeBackground(bg string, done chan bool) {
 	execCommand(createBackgroundChangeCommand(bg))
+	time.Sleep(time.Second * time.Duration(*timeToShow))
+	done <- true
 }
 
-func changeScreensaver(bg string) {
-	if *changeLockScreen != true {
-		return
+func changeScreensaver(bg string, done chan bool) {
+	if *changeLockScreen == true {
+		execCommand(createScreensaverChangeCommand(bg))
+		time.Sleep(time.Second * time.Duration(*timeToShow))
 	}
-	execCommand(createScreensaverChangeCommand(bg))
+	done <- true
 }
 
 func createBackgroundChangeCommand(bg string) string {
 	cmd := fmt.Sprintf("%v %v %v%v %v", "dconf", "write", BACKGROUND_DCONF_BASE_URI, KEY_PICTURE_URI, fmt.Sprintf("\"'file://%v'\"", bg))
-	log.Printf("command : %v", cmd)
 	return cmd
 }
 
@@ -90,7 +92,7 @@ func createScreensaverChangeCommand(bg string) string {
 func execCommand(cmd string) {
 	chBgCmd := exec.Command("bash", "-c", cmd)
 	out, err := chBgCmd.CombinedOutput()
-	log.Printf("Out: %v, error: %v", string(out), err)
+	log.Printf("%v Out: %v, error: %v", cmd, string(out), err)
 }
 
 func readUserEnvironment() {
@@ -107,25 +109,22 @@ func expandDirPath(path string) string {
 	return path
 }
 
-func setUpBackgroundsDir(bgDir string) []string {
-	if strings.Contains(bgDir, ",") {
-		dirs := strings.Split(bgDir, ",")
-		for i, dir := range dirs {
+func setUpBackgroundsDir() {
+	if strings.Contains(*backgroundsDir, ",") {
+		dirs := strings.Split(*backgroundsDir, ",")
+		for _, dir := range dirs {
 			if strings.Contains(dir[:2], "~/") {
-				dirs[i] = expandDirPath(dir)
+				bgDirs = append(bgDirs, expandDirPath(dir))
 			} else {
-				dirs[i] = dir
+				bgDirs = append(bgDirs, dir)
 			}
 		}
-		return dirs
 	}
-	return []string{expandDirPath(bgDir)}
+	bgDirs = append(bgDirs, expandDirPath(*backgroundsDir))
 }
 
-func scanBackgroundsDir(paths []string) ([]string, []error) {
-	files := make([]string, 0)
-	hasErrors := make([]error, 0)
-	for _, root := range paths {
+func scanBackgroundsDir(done chan bool) {
+	for _, root := range bgDirs {
 		walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err == nil {
 				if info.IsDir() && *searchImagesRecursively != true {
@@ -135,8 +134,15 @@ func scanBackgroundsDir(paths []string) ([]string, []error) {
 					return filepath.SkipDir
 				} else {
 					for _, t := range allowedFileTypes {
-						if strings.Contains(strings.ToLower(info.Name()), t) {
-							files = append(files, path)
+						if strings.Contains(strings.ToLower(info.Name()), t) && !func() bool {
+							for _, f := range bgFiles {
+								if f == path {
+									return true
+								}
+							}
+							return false
+						}() {
+							bgFiles = append(bgFiles, path)
 						}
 					}
 				}
@@ -144,8 +150,8 @@ func scanBackgroundsDir(paths []string) ([]string, []error) {
 			return err
 		})
 		if walkErr != nil {
-			hasErrors = append(hasErrors, walkErr)
+			errors = append(errors, walkErr)
 		}
+		done <- true
 	}
-	return files, hasErrors
 }
