@@ -28,6 +28,7 @@ var bgDirs = make([]string, 0)
 var bgFiles = make([]string, 0)
 var errors = make([]error, 0)
 var allowedFileTypes = []string{"jpeg", "jpg", "png"}
+var currentBg = ""
 
 func init() {
 	flag.Parse()
@@ -57,24 +58,28 @@ func loop() {
 		<- doneScan
 		randInd := rnd.Intn(len(bgFiles) - 1)
 		bgFile := bgFiles[randInd]
-		log.Printf("Files %v", bgFiles)
 		go changeBackground(bgFile, doneBgChange)
 		go changeScreensaver(bgFile, doneScSaverChange)
 		<- doneBgChange
 		<- doneScSaverChange
+		currentBg = bgFile
 	}
 }
 
 func changeBackground(bg string, done chan bool) {
-	execCommand(createBackgroundChangeCommand(bg))
-	time.Sleep(time.Second * time.Duration(*timeToShow))
+	if currentBg != bg {
+		execCommand(createBackgroundChangeCommand(bg))
+		time.Sleep(time.Second * time.Duration(*timeToShow))
+	}
 	done <- true
 }
 
 func changeScreensaver(bg string, done chan bool) {
 	if *changeLockScreen == true {
-		execCommand(createScreensaverChangeCommand(bg))
-		time.Sleep(time.Second * time.Duration(*timeToShow))
+		if currentBg != bg {
+			execCommand(createScreensaverChangeCommand(bg))
+			time.Sleep(time.Second * time.Duration(*timeToShow))
+		}
 	}
 	done <- true
 }
