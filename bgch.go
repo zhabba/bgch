@@ -17,7 +17,7 @@ const SCREENSAVER_DCONF_BASE_URI = "/org/gnome/desktop/screensaver/"
 const KEY_PICTURE_URI = "picture-uri"
 const KEY_PICTURE_OPTIONS = "picture-options" //zoom, whatever
 
-var backgroundsDir = flag.String("bg", "Pictures", "Path to directory (or comma-separated list of directories) containing backgrounds. Optional")
+var backgroundsDir = flag.String("bg", "~/Pictures", "Path to directory (or comma-separated list of directories) containing backgrounds. Optional")
 var timeToShow = flag.Int("tts", 300, "Time to keep current background in seconds. Optional")
 var changeLockScreen = flag.Bool("ls", false, "Change lockscreen background either. Optional")
 var searchImagesRecursively = flag.Bool("r", false, "Search images recursively. Optional")
@@ -44,30 +44,49 @@ func main() {
 	log.Printf("Will use %v dirs as backgrounds directory and change background every %v seconds.", *backgroundsDir, *timeToShow)
 	setUpBackgroundsDir()
 	go loop()
-	select{}
+	select {}
 }
 
 func loop() {
 	seed := rand.NewSource(time.Now().UnixNano())
 	rnd := rand.New(seed)
 	doneScan := make(chan bool, 1)
+	bgDirIsEmpty := make(chan bool, 1)
+	bgFileIsSingle := make(chan bool, 1)
 	doneBgChange := make(chan bool, 1)
 	doneScSaverChange := make(chan bool, 1)
 	for {
-		go scanBackgroundsDir(doneScan)
-		<- doneScan
-		randInd := rnd.Intn(len(bgFiles) - 1)
-		bgFile := bgFiles[randInd]
-		go changeBackground(bgFile, doneBgChange)
-		go changeScreensaver(bgFile, doneScSaverChange)
-		<- doneBgChange
-		<- doneScSaverChange
-		currentBg = bgFile
+		go scanBackgroundsDir(doneScan, bgDirIsEmpty, bgFileIsSingle)
+		select {
+		case <-bgDirIsEmpty:{
+			log.Println("Bg dir is empty ... Place more nice images there ...")
+			time.Sleep(time.Second * time.Duration(*timeToShow))
+		}
+		case <-bgFileIsSingle:{
+			time.Sleep(time.Second * time.Duration(*timeToShow))
+		}
+		case <-doneScan:
+			{
+				var limit int
+				if len(bgFiles) <= 1 {
+					limit = 1
+				} else {
+					limit = len(bgFiles) -1
+				}
+				randInd := rnd.Intn(limit)
+				bgFile := bgFiles[randInd]
+				go changeBackground(bgFile, doneBgChange)
+				go changeScreensaver(bgFile, doneScSaverChange)
+				<-doneBgChange
+				<-doneScSaverChange
+				currentBg = bgFile
+			}
+		}
 	}
 }
 
 func changeBackground(bg string, done chan bool) {
-	if currentBg != bg {
+	if currentBg != bg && len(bgFiles) > 1 {
 		execCommand(createBackgroundChangeCommand(bg))
 		time.Sleep(time.Second * time.Duration(*timeToShow))
 	}
@@ -75,7 +94,7 @@ func changeBackground(bg string, done chan bool) {
 }
 
 func changeScreensaver(bg string, done chan bool) {
-	if *changeLockScreen == true {
+	if *changeLockScreen == true && len(bgFiles) > 1 {
 		if currentBg != bg {
 			execCommand(createScreensaverChangeCommand(bg))
 			time.Sleep(time.Second * time.Duration(*timeToShow))
@@ -128,7 +147,7 @@ func setUpBackgroundsDir() {
 	bgDirs = append(bgDirs, expandDirPath(*backgroundsDir))
 }
 
-func scanBackgroundsDir(done chan bool) {
+func scanBackgroundsDir(done chan bool, empty chan bool, single chan bool) {
 	for _, root := range bgDirs {
 		walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err == nil {
@@ -157,6 +176,13 @@ func scanBackgroundsDir(done chan bool) {
 		if walkErr != nil {
 			errors = append(errors, walkErr)
 		}
+	}
+	log.Printf("Errors: %v", errors)
+	if len(bgFiles) == 0 {
+		empty <- true
+	} else if len(bgFiles) == 1 {
+		single <- true
+	} else {
 		done <- true
 	}
 }
